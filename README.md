@@ -3,7 +3,7 @@ Here’s how this happened. I am working for a startup and we needed a great wik
 In any case, we wanted to save money so I started looking around and found this awesome product called [Bookstack](https://www.bookstackapp.com/). This app has a lot but mainly I liked the way it has native Draw.IO integration and had a pretty decent WYSIWYG editor. 
 In any case, I decided I wanted to ensure that the implementation was a solid as possible on Azure. So I looked into deploying it on AKS. 
 # Helm Chart
-In this repo, you’ll find a heavily modified Helm chart for deploying the bookstack cluster on AKS. First you’ll need to add the repo then you can deploy the chart (after you modify everything in between the carrots < >). 
+In this repo, you’ll find a heavily modified Helm chart for deploying the bookstack cluster on AKS. First you’ll need to add the repo then you can deploy the chart **==(after you modify everything in between the carrots < >)==**. 
 
 `helm repo add k8s-at-home https://k8s-at-home.com/charts`
 
