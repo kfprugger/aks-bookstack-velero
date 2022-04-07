@@ -1,0 +1,147 @@
+# Author: Joey Brakefield & Bookstack Community
+# Date: 04/04/2022
+# Purpose: Deploy open source Bookstack instance with external MySQL and added persistent volumes to be backed up by Velero in case of a disaster.
+
+
+# IMPORTANT NOTE
+#
+# This chart inherits from our common library chart. You can check the default values/options here:
+# https://github.com/k8s-at-home/library-charts/tree/main/charts/stable/common/values.yaml
+#
+
+image:
+  # -- image repository
+  repository: ghcr.io/linuxserver/bookstack
+  # -- image tag
+  pullPolicy: IfNotPresent
+  # -- image pull policy
+  tag: latest
+
+# -- environment variables. See more environment variables in the [bookstack documentation](https://hub.docker.com/r/linuxserver/bookstack)
+# @default -- See below
+env:
+  # -- Set the container timezone
+
+  TZ: Americas/New_York
+  
+  # I setup Azure Database for MySQL to host my database rather than inside the AKS cluster for extra resilience :-)
+  DB_HOST: <your MySQL PaaS Instance in Azure>.mysql.database.azure.com 
+  DB_USER: bookstack # Database user I manually setup
+  DB_PASS: '<super_secret>' # Database password I manually setup
+  DB_DATABASE: bookstackdev # Database I manually setup
+  
+  APP_URL: https://<your FQDN hostname>
+  AZURE_APP_ID: <bookstack SPN App ID/Client ID
+  AZURE_APP_SECRET: <Azure generated secret>
+  AZURE_TENANT: <Azure Tenant ID>
+  AZURE_AUTO_REGISTER: true
+
+
+  MAIL_DRIVER: smtp
+  MAIL_HOST: smtp.office365.com
+  MAIL_PORT: 587
+  MAIL_ENCRYPTION: tls
+  MAIL_USERNAME: <user name from O365 mailbox>
+  MAIL_PASSWORD: <mailbox password from O365>
+
+  MAIL_FROM: kb@<yourdomainname>
+  MAIL_FROM_NAME: <Super Awesome Bookstack Instance>
+
+
+
+# -- Configures service settings for the chart.
+# @default -- See values.yaml
+service:
+  main:
+    ports:
+      http:
+        port: 80
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+
+ingress:
+  # -- Enable and configure ingress settings for the chart under this key.
+  # @default -- See values.yaml
+  main:
+    enabled: true
+    annotations: 
+      # Aligns with you ingress. Check this: https://docs.microsoft.com/en-us/azure/aks/ingress-tls?tabs=azure-cli#create-an-ingress-controller
+      kubernetes.io/ingress.class: nginx
+      #certmanager.k8s.io/cluster-issuer: letsencrypt-production-cluster
+      # This aligns with the cluster issuer you already have in your AKS cluster. If you need help, check this: https://docs.microsoft.com/en-us/azure/aks/ingress-tls?tabs=azure-cli#create-a-ca-cluster-issuer
+      cert-manager.io/cluster-issuer: letsencrypt-production
+      service.beta.kubernetes.io/azure-dns-label-name: <AKS Public IP address>.eastus.cloudapp.azure.com # change this to match your cluster's public IP address assigned by AKS. Public IP --> DNS configuration blade
+      # This is the optional additional Office 365 AuthN gate before even getting to the application. If you want to use this Oauth2 Proxy, check this repo: https://github.com/adamlash/oauth2-proxy-azuread NOTE this is NOT necessary to function...just added security
+      nginx.ingress.kubernetes.io/auth-url: "https://<oauth2 proxy gate DNS entry>/oauth2/auth"
+      nginx.ingress.kubernetes.io/auth-signin: "https://<oauth2 proxy gate DNS entry>/oauth2/start?rd=https://$host$request_uri"
+      # backup.velero.io/backup-volumes: "storage,uploads"
+    hosts:
+      -  # -- Host address. Helm template can be passed.
+        host: <your FQDN hostname without https://>
+        ## Configure the paths for the host
+        paths:
+          -  # -- Path.  Helm template can be passed.
+            path: /
+            # -- Ignored if not kubeVersion >= 1.14-0
+            pathType: Prefix
+            service:
+              # -- Overrides the service name reference for this path
+              name: bookstack
+              # -- Overrides the service port reference for this path
+              port: 80
+
+    # -- Configure TLS for the ingress. Both secretName and hosts can process a Helm template.
+    tls: 
+     - secretName: 1-bookstack-secret-tls1
+       hosts:
+         - <your FQDN hostname without https://>
+
+# -- Configure persistence settings for the chart under this key.
+# @default -- See values.yaml
+
+## Here's where I added additional persistent volumes for Velero to backup
+persistence: 
+  config:
+    enabled: true
+    mountPath: /config
+    accessMode: ReadWriteOnce
+    size: 8Gi
+  storage:
+    enabled: true
+    #mountPath: /sto-pv
+    local: 
+      path: /var/www/html/storage/uploads
+    # mountPath: /var/www/html/storage-pv
+    accessMode: ReadWriteOnce
+    size: 8Gi
+  uploads:
+    enabled: true
+    # mountPath: /upload-pv
+    local: 
+      path: /var/www/html/public/uploads
+    # mountPath: /var/www/html/public/uploads-pv
+    accessMode: ReadWriteOnce
+    size: 8Gi   
+
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+# -- Enable and configure mariadb database subchart under this key.
+#    For more options see [mariadb chart documentation](https://github.com/bitnami/charts/tree/master/bitnami/mariadb).
+# @default -- See values.yaml
+
+# Set this to "enabled" if you don't want to deploy Azure MySQL and instead want to use a DB inside the cluster (not recommended for resilience)
+mariadb:
+  enabled: false
+  architecture: standalone
+  auth:
+    database: bookstack
+    username: bookstack
+    password: bookstack
+  primary:
+    persistence:
+      enabled: false

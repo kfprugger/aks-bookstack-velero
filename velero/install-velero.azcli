@@ -1,0 +1,205 @@
+# Login to Azure
+az login
+
+# Set variables
+export SUBSCRIPTION_ID=$(az account show -o json | jq -r '.id') && export AZURE_SUBSCRIPTION_ID=$(az account show -o json | jq -r '.id') && export AZURE_BACKUP_SUBSCRIPTION_ID=$(az account show -o json | jq -r '.id') && export AZURE_RESOURCE_GROUP=$(az aks show --name "${AKS_NAME}" --resource-group "${AKS_RESOURCE_GROUP}" -o json | jq -r '.nodeResourceGroup')
+## This is the customer name that we used in the naming convention of the AKS cluster. For me, it's "aks-<customer indicator>-internal-<environment>" --> aks-cus-internal-dev would be the name here
+export customer=<customer name>
+export TENANT_ID=<Azure Tenant ID --or-- az account show -ojson | jq -r .homeTenantId >
+export AZURE_TENANT_ID=$TENANT_ID
+## Environment for the AKS name and location + RG
+export env=prod
+export LOCATION=eastus
+export AKS_NAME=aks-$customer-internal-$env
+export AKS_RESOURCE_GROUP=rg-$customer-internal-$env
+
+## Choose your Velero Backup info
+export BACKUP_RESOURCE_GROUP=rg-velero-backup
+
+### Namespace to backup
+AKS_NAMESPACE=bookstack
+
+### Velero Storage Info
+export STORAGE_ACCOUNT_NAME="sa"$customer"velero"$(openssl rand -hex 3)
+export STORAGE_ACCOUNT_CONTAINER_NAME='velero'
+export STORAGE_CONTAINER_NAME=$STORAGE_ACCOUNT_CONTAINER_NAME
+export BLOB_CONTAINER=$STORAGE_ACCOUNT_CONTAINER_NAME
+
+
+export STORAGE_ACCOUNT=$STORAGE_ACCOUNT_NAME
+export AZURE_STORAGE_ACCOUNT_ID=$STORAGE_ACCOUNT_NAME
+export STORAGE_RESOURCE_GROUP=$BACKUP_RESOURCE_GROUP
+export STORAGE_CONTAINER_NAME=$STORAGE_ACCOUNT_CONTAINER_NAME
+export BLOB_CONTAINER=$STORAGE_CONTAINER_NAME
+export AZURE_BACKUP_RESOURCE_GROUP=$BACKUP_RESOURCE_GROUP
+export AZURE_STORAGE_ACCOUNT_ID=$STORAGE_ACCOUNT_NAME
+
+### SPN for Velero to use to backup
+export SPN_NAME=spn-velero-dev
+
+
+
+
+# Service Principal Name Setup (create if not present)
+AZURE_CLIENT_SECRET=$(az ad sp create-for-rbac -n "${SPN_NAME}" --role "Contributor" --scopes "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}"  \
+    --query 'password' -o tsv )
+AZURE_CLIENT_ID=$(az ad sp list --display-name "${SPN_NAME}" --query '[0].appId' -o tsv)
+
+
+# Create AKS cluster -- probably isn't necessary; you have a cluster to backup in mind :-) Only use this if you want to create a new AKS 
+az group create --name "${AKS_RESOURCE_GROUP}" --location $LOCATION
+az aks create --name "${AKS_NAME}" \
+    --resource-group "${AKS_RESOURCE_GROUP}" \
+    --enable-cluster-autoscaler \
+    --min-count 2 \
+    --max-count 3 \
+    --no-ssh-key \
+    --network-plugin azure \
+    --network-policy azure \
+    --location $LOCATION
+
+# Connect to your AKS cluster. This changes your kubectl context to target AKS cluster
+az aks install-cli
+az aks get-credentials --name "${AKS_NAME}" \
+    --resource-group "${AKS_RESOURCE_GROUP}" \
+    --admin \
+    --overwrite-existing
+
+# Check cluster works
+kubectl get pod -A
+
+
+
+# Velero + Azure Storage Config
+## Create Backup Resource Group
+
+az group create --name "${BACKUP_RESOURCE_GROUP}" --location $LOCATION
+
+## Create Storage Account
+az storage account create --name "${STORAGE_ACCOUNT_NAME}" \
+  --resource-group "${BACKUP_RESOURCE_GROUP}" \
+  --location ${LOCATION} \
+  --sku STANDARD_LRS
+
+az storage container create \
+  --name "${STORAGE_ACCOUNT_CONTAINER_NAME}" \
+  --account-name "${STORAGE_ACCOUNT_NAME}" \
+  --public-access off
+
+# Sanity Check. This long echo command should NOT have any blanks or malformed/unexpected values
+
+echo -e "\n SUBSCRIPTION_ID:  \n" $SUBSCRIPTION_ID "\n" \
+"\n Managed AKS Resource Group: \n" $AZURE_RESOURCE_GROUP "\n" \
+"\n AKS_RESOURCE_GROUP: \n" $AKS_RESOURCE_GROUP "\n" \
+"\n AKS_NAME: \n" $AKS_NAME "\n" \
+"\n BACKUP_RESOURCE_GROUP: \n" $BACKUP_RESOURCE_GROUP "\n" \
+"\n STORAGE_ACCOUNT_NAME: \n" $STORAGE_ACCOUNT_NAME "\n" \
+"\n STORAGE ACCOUNT CONTAINER NAME: \n" $STORAGE_ACCOUNT_CONTAINER_NAME "\n" \
+"\n STORAGE ACCOUNT ID: \n" $AZURE_STORAGE_ACCOUNT_ID "\n" \
+"\n STORAGE ACCOUNT CONTAINER NAME: \n" $STORAGE_CONTAINER_NAME "\n" \
+"\n Azure Subscription ID: \n" $AZURE_SUBSCRIPTION_ID "\n" \
+"\n Azure Subscription ID: \n" $AZURE_BACKUP_SUBSCRIPTION_ID "\n" \
+"\n Azure Storage BLOB_CONTAINER : \n" $BLOB_CONTAINER  "\n" \
+"\n AZURE_BACKUP_RESOURCE_GROUP : \n" $AZURE_BACKUP_RESOURCE_GROUP  "\n" \
+"\n LOCATION: \n" $LOCATION "\n"
+
+# Now that variables are set, create the credential file for Velero to use
+
+## Remvoe the credentials file if already present
+sudo rm ./credentials-velero
+
+## Write the credential file out
+cat << EOF  > ./credentials-velero
+AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}
+AZURE_TENANT_ID=${AZURE_TENANT_ID}
+AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+AZURE_RESOURCE_GROUP=${AZURE_RESOURCE_GROUP}
+AZURE_CLOUD_NAME=AzurePublicCloud
+EOF
+
+
+# Install the Velero CLI if not present. Below are the steps for Ubuntu for Velero client v1.7.2
+mkdir ~/velero-cli
+cd ~/velero-cli
+wget https://github.com/vmware-tanzu/velero/releases/download/v1.7.2/velero-v1.7.2-linux-amd64.tar.gz
+tar zxf velero-v1.7.2-linux-amd64.tar.gz 
+sudo mv velero-v1.7.2-linux-amd64/velero /usr/local/bin/
+
+## Cleanup install files if you want
+cd ~
+rm -rf ~/velero-cli
+
+velero version
+
+# Use the Velero client to do the install (instead of Helm)
+velero install \
+   --image velero/velero:v1.7.2\
+   --provider azure \
+   --plugins velero/velero-plugin-for-microsoft-azure:v1.4.1 \
+   --bucket $BLOB_CONTAINER \
+   --secret-file ./credentials-velero \
+   --use-volume-snapshots=false \
+   --backup-location-config resourceGroup=$AZURE_BACKUP_RESOURCE_GROUP,storageAccount=$AZURE_STORAGE_ACCOUNT_ID,subscriptionId=$AZURE_BACKUP_SUBSCRIPTION_ID \
+   --use-restic
+
+  #--snapshot-location-config apiTimeout=5m,resourceGroup=$AZURE_BACKUP_RESOURCE_GROUP,subscriptionId=$AZURE_BACKUP_SUBSCRIPTION_ID \
+
+# Ensure the install went well. Readout should have both CLIENT version and SERVER version
+velero version 
+
+# Annotate the pod -- Not needed anymore if specifying the namespace and default to restic args..
+### pod=$(k get pod -n $AKS_NAMESPACE -ojson | jq .items[].metadata.name | tr -d \")
+### kubectl annotate pod $pod backup.velero.io/backup-volumes=bookstack-storage,bookstack-uploads
+
+# Now setup the backup for bookstack (and others if we want)
+velero backup create bs-bak --default-volumes-to-restic --include-namespaces $AKS_NAMESPACE
+
+# Describe to ensure the backup went successfully before we do a test restore.
+velero backup describe bs-bak --details # (look for RESTIC backups. These are file level backups)
+
+## Delete an image from bookstack and the restore it. Below is the restore command. Terminal into to the bookstack pod and delete something from the /var/www/html/public/uploads/images/gallery/<date/ AFTER the backup was taken
+
+
+# Now time to test. A backup is no good if you can't restore :-) Delete the helm chart to kill the deployment (but keep the SSL certs!). Wait about a minute for the pod and everything to come down.
+helm delete bookstack -n $AKS_NAMESPACE 
+
+# Now that the entire bookstack instance is gone **GASP**, we can restore from the backup we just took. Note that the persistent volume that wouldn't be backed up normally is now restored replete with the manually deleted image we did on line #160
+velero restore create --from-backup bs-bak --include-namespaces $AKS_NAMESPACE
+
+# Schedule it to recur. https://velero.io/docs/v1.8/backup-reference/#schedule-a-backup
+velero schedule create bs-every24h --schedule="@every 24h" --include-namespaces $AKS_NAMESPACE --default-volumes-to-restic
+
+
+
+
+
+#______
+# Old, discarded approaches. This is why I have so many variables at the top
+
+# helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+
+
+
+# helm upgrade --install velero vmware-tanzu/velero --namespace velero --create-namespace \
+# --set "initContainers[0].image=velero/velero-plugin-for-microsoft-azure:v1.4.0" \
+# --set "initContainers[0].imagePullPolicy=IfNotPresent" \
+# --set "initContainers[0].volumeMounts[0].mountPath=/target" \
+# --set "initContainers[0].volumeMounts[0].name=plugins" \
+# --set "initContainers[0].name=velero-plugin-for-azure" \
+# --set credentials.existingSecret='velero-credentials' \
+# --set configuration.provider='azure' \
+# --set configuration.backupStorageLocation.bucket=$STORAGE_CONTAINER_NAME \
+# --set configuration.backupStorageLocation.config.resourceGroup=$STORAGE_RESOURCE_GROUP \
+# --set configuration.backupStorageLocation.config.storageAccount=$STORAGE_ACCOUNT \
+# --set configuration.backupStorageLocation.config.subscriptionId=$AZURE_SUBSCRIPTION_ID \
+# --set configuration.volumeSnapshotLocation.name=azure-$LOCATION \
+# --set configuration.volumeSnapshotLocation.config.resourceGroup=$STORAGE_RESOURCE_GROUP \
+# --set configuration.volumeSnapshotLocation.config.subscriptionId=$AZURE_SUBSCRIPTION_ID
+
+# AZURE_STORAGE_ACCOUNT_ACCESS_KEY=$(az storage account keys list --account-name $AZURE_STORAGE_ACCOUNT_ID --query "[?keyName == 'key1'].value" -o tsv)
+# "\n Azure Storage Account Key: \n" $AZURE_STORAGE_ACCOUNT_ACCESS_KEY "\n \
+# echo $AZURE_STORAGE_ACCOUNT_ACCESS_KEY
+
+# credentials file entry above EOF
+# AZURE_STORAGE_ACCOUNT_ACCESS_KEY=${AZURE_STORAGE_ACCOUNT_ACCESS_KEY}
